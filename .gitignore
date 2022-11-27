@@ -1,0 +1,10 @@
+**/.ipynb_checkpoints
+**/__pycache__
+*.png
+*.mp4
+*.npy
+*.npz
+*.dae
+logs/*
+data/nerf_llff_data/*
+data/nerf_synthetic/lego/*
