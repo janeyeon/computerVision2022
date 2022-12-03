@@ -167,6 +167,9 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
             rgb8 = to8b(rgbs[-1])
             filename = os.path.join(savedir, '{:03d}.png'.format(i))
             imageio.imwrite(filename, rgb8)
+            disp8 = to8b(disps[-1])
+            filename = os.path.join(savedir, 'd_{:03d}.png'.format(i))
+            imageio.imwrite(filename, disp8)
 
 
     rgbs = np.stack(rgbs, 0)
@@ -261,12 +264,13 @@ def create_nerf(args):
 
 # TODO: Modify this function! 
 # change RGB values with light direction info + camera direction 
-def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=False):
+def raw2outputs(raw, z_vals, rays_d, pts, raw_noise_std=0, white_bkgd=False, pytest=False):
     """Transforms model's predictions to semantically meaningful values.
     Args:
         raw: [num_rays, num_samples along ray, 4]. Prediction from model.
         z_vals: [num_rays, num_samples along ray]. Integration time.
         rays_d: [num_rays, 3]. Direction of each ray.
+        pts: [num_rays, num_samples, 3] xyz value for each raysample
     Returns:
         # object's color 
         rgb_map: [num_rays, 3]. Estimated RGB color of a ray.
@@ -309,10 +313,112 @@ def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=F
     disp_map = 1./torch.max(1e-10 * torch.ones_like(depth_map), depth_map / torch.sum(weights, -1))
     acc_map = torch.sum(weights, -1)
 
+    # TODO : depth map을 바꿔서 그거의 역수를 취한 disp_map으로 output 확인
+
+    # acc_map_tmp = acc_map
+    # acc_map_tmp[acc_map_tmp <= 0.9] = 0
+    # red = torch.ones_like(rgb_map[...,0])
+    # rgb_map[...,1] = rgb_map[...,1] + red
+    # rgb_map = rgb_map / 2 * acc_map_tmp[...,None]
+    # np.set_printoptions(threshold = sys.maxsize)
+    # torch.set_printoptions(threshold = sys.maxsize)
+    # print(depth_map)
+    # print(acc_map)
+    # r = 0.0
+    # g = 0.0
+    # b = 1.0
+    # rgb_map[...,0] = rgb_map[...,0] * r
+    # rgb_map[...,1] = rgb_map[...,1] * g
+    # rgb_map[...,2] = rgb_map[...,2] * b
+
+    new_rgb_map = change_color(rgb_map, disp_map, acc_map, weights, depth_map, pts)
+    rgb_map = new_rgb_map
+
     if white_bkgd:
         rgb_map = rgb_map + (1.-acc_map[...,None])
 
     return rgb_map, disp_map, acc_map, weights, depth_map
+
+def change_color(rgb_map, disp_map, acc_map, weights, depth_map, pts):
+
+    N_rays, N_samples, _ = pts.shape
+    # rays = np.arange(N_rays)
+    # samples = np.arange(N_samples)
+    # m_rays, m_samples = np.meshgrid(rays, samples)
+
+
+    thres = 0.02
+
+    sphere_diffuse = torch.tensor([0.5, 0., 0.])
+    sphere_ambient = [0.1, 0., 0.] # shadow color 
+    sphere_specular = sphere_diffuse * 2 # need clip? 
+
+    plane_diffuse = torch.tensor([1., 1., 1.])
+    plane_ambient = plane_diffuse # shadow color for plane
+
+    # shpere  
+    sphere_center = [0., 0., 0,5]
+    sphere_radius = 0.5
+
+    # 0 : sphere surface
+    # + : sphere outer range
+    # - : sphere inner range
+    sphere_ftn = lambda z, x, y: (x - sphere_center[0])**2 + (y - sphere_center[1])**2 + (-z - sphere_center[2])**2 - sphere_radius**2 
+
+    # shadow plane for sphere
+    # 0 : plane surface
+    # + : plane upper range
+    # - : plane bottom range
+    sphere_shadow_plane_ftn = lambda z: z - 5/9
+
+    # sphere shadow
+    # 1 : true for sphere shadow area
+    # 0 : false for non sphere shadow area
+    sphere_shadow_ftn = lambda arr: 1 if abs(sphere_ftn(arr[0], arr[1], arr[2])) < thres and sphere_shadow_plane_ftn(-arr[0]) < 0 else 0 
+
+    # plane shadow 
+    # 1 : true for plane shadow area 
+    # 0 : false for non plane shadow area 
+    plane_shadow_ftn = lambda arr: 1 if abs(-arr[0]) < thres and (arr[1]**2 + arr[2]**2 - 5/16) < 0 else 0
+
+    # v_sphere_shadow_ftn = np.vectorize(sphere_shadow_ftn)
+    # v_plane_shadow_ftn = np.vectorize(plane_shadow_ftn)
+
+    pts = pts.reshape(N_rays * N_samples, 3)
+    # rgb_map : [N_rays, 3]
+    # pts : [(N_rays * N_samples, 3]
+    s_pts = torch.tensor(list(map(sphere_shadow_ftn, pts)))  # [N_rays * N_samples, 1]
+    s_pts = s_pts.reshape(N_rays, N_samples)
+    is_s_shadow = s_pts.sum(-1) # [N_rays]
+    p_pts = torch.tensor(list(map(plane_shadow_ftn, pts))) # [N_rays * N_samples, 1]
+    p_pts = p_pts.reshape(N_rays, N_samples) 
+    is_p_shadow = p_pts.sum(-1) # [N_rays]
+
+    change_color = lambda original, condition, new: new if condition else original 
+    change_plane =  torch.tensor(list(map(change_color,rgb_map, is_p_shadow, plane_diffuse)))  # [N_rays, 3], torch.tensor's list
+    change_sphere =  torch.tensor((map(change_color, change_plane, is_s_shadow, sphere_diffuse)))  # [N_rays, 3], torch.tensor
+
+    # change_sphere = change_sphere.reshape(N_rays, N_samples, 3)
+    # change_sphere = torch.tensor(change_sphere)
+
+
+
+    # for ray in range(N_rays):
+    #     for sample in range(N_samples):
+    #         # for each point
+    #         x, y, z = pts[ray][sample]
+
+    #         if plane_shadow_ftn(x, y, z):
+    #             # shadow exist
+    #             rgb_map[ray][sample] = plane_diffuse
+                
+    #         if sphere_shadow_ftn(x, y, z):
+    #             # shadow exist
+    #             rgb_map[ray][sample] = sphere_diffuse
+
+
+    return change_sphere
+
 
 
 def render_rays(ray_batch,
@@ -390,11 +496,10 @@ def render_rays(ray_batch,
 
     pts = rays_o[...,None,:] + rays_d[...,None,:] * z_vals[...,:,None] # [N_rays, N_samples, 3]
 
-
 #     raw = run_network(pts)
     # coarse network
     raw = network_query_fn(pts, viewdirs, network_fn)
-    rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(raw, z_vals, rays_d, raw_noise_std, white_bkgd, pytest=pytest)
+    rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(raw, z_vals, rays_d, pts, raw_noise_std, white_bkgd, pytest=pytest)
 
     # fine network
     if N_importance > 0:
@@ -412,7 +517,7 @@ def render_rays(ray_batch,
 #         raw = run_network(pts, fn=run_fn)
         raw = network_query_fn(pts, viewdirs, run_fn)
 
-        rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(raw, z_vals, rays_d, raw_noise_std, white_bkgd, pytest=pytest)
+        rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(raw, z_vals, rays_d, pts, raw_noise_std, white_bkgd, pytest=pytest)
 
     ret = {'rgb_map' : rgb_map, 'disp_map' : disp_map, 'acc_map' : acc_map}
     if retraw:
@@ -677,9 +782,10 @@ def train():
             os.makedirs(testsavedir, exist_ok=True)
             print('test poses shape', render_poses.shape)
 
-            rgbs, _ = render_path(render_poses, hwf, K, args.chunk, render_kwargs_test, gt_imgs=images, savedir=testsavedir, render_factor=args.render_factor)
+            rgbs, disps = render_path(render_poses, hwf, K, args.chunk, render_kwargs_test, gt_imgs=images, savedir=testsavedir, render_factor=args.render_factor)
             print('Done rendering', testsavedir)
             imageio.mimwrite(os.path.join(testsavedir, 'video.mp4'), to8b(rgbs), fps=30, quality=8)
+            # imageio.mimwrite(os.path.join(testsavedir, 'video.mp4'), to8b(rgbs), fps=30, quality=8)
 
             return
 
