@@ -264,7 +264,7 @@ def create_nerf(args):
 
 # TODO: Modify this function! 
 # change RGB values with light direction info + camera direction 
-def raw2outputs(raw, z_vals, rays_d, pts, raw_noise_std=0, white_bkgd=False, pytest=False):
+def raw2outputs(raw, z_vals, rays_o, rays_d, pts, raw_noise_std=0, white_bkgd=False, pytest=False):
     """Transforms model's predictions to semantically meaningful values.
     Args:
         raw: [num_rays, num_samples along ray, 4]. Prediction from model.
@@ -302,6 +302,7 @@ def raw2outputs(raw, z_vals, rays_d, pts, raw_noise_std=0, white_bkgd=False, pyt
     # weights = alpha * tf.math.cumprod(1.-alpha + 1e-10, -1, exclusive=True)
     weights = alpha * torch.cumprod(torch.cat([torch.ones((alpha.shape[0], 1)), 1.-alpha + 1e-10], -1), -1)[:, :-1]
     rgb_map = torch.sum(weights[...,None] * rgb, -2)  # [N_rays, 3]
+    print(f'rgb_map: {rgb_map.shape}')
     # function 
     # rgb_map = convert(rgb_map, light_dir, camera_position, options) 
     # option 
@@ -331,72 +332,109 @@ def raw2outputs(raw, z_vals, rays_d, pts, raw_noise_std=0, white_bkgd=False, pyt
     # rgb_map[...,1] = rgb_map[...,1] * g
     # rgb_map[...,2] = rgb_map[...,2] * b
 
-    new_rgb_map = change_color(rgb_map, disp_map, acc_map, weights, depth_map, pts)
+    new_rgb_map = change_color(rgb_map, disp_map, acc_map, weights, depth_map, rays_o, rays_d, pts)
     rgb_map = new_rgb_map
-
+    print("!!")
     if white_bkgd:
         rgb_map = rgb_map + (1.-acc_map[...,None])
 
     return rgb_map, disp_map, acc_map, weights, depth_map
 
-def change_color(rgb_map, disp_map, acc_map, weights, depth_map, pts):
+def change_color(rgb_map, disp_map, acc_map, weights, depth_map, ray_o, ray_d, pts):
+
+    # ray_o = ray_o[...,:] #[N_rays, 3]
+    print(f'ray_o: {ray_o.shape}')
+    ray_o = ray_o[0] #[3, ]
+    # ray_d = ray_d[...,:] #[N_rays, 3]
 
     N_rays, N_samples, _ = pts.shape
+    print(f'pts: {pts.shape}')
     # rays = np.arange(N_rays)
     # samples = np.arange(N_samples)
     # m_rays, m_samples = np.meshgrid(rays, samples)
 
-
     thres = 0.02
+    light_o = torch.tensor([0, 0, 5]) # z, x, y
+    sphere_center = torch.tensor([0., 0., 0.5]) # z, x, y
+    r = 0.5
+
+    view_plane_norm = ray_o - sphere_center #[3, ] = [a, b, c]
+    view_plane_norm = view_plane_norm / torch.norm(view_plane_norm) # normalize
+    p = torch.pow(ray_o - sphere_center, 2).sum().data # scalar, distance b/w ray origin to sphere center
+    t = (p - r**2)/torch.sqrt(p) # distance b/w ray origin to plane
+    view_plane_point = ray_o - view_plane_norm * t 
+    view_plane_d = - torch.dot(view_plane_point, view_plane_norm)
+    view_plane = lambda x, y, z : torch.dot(view_plane_norm, torch.tensor([x, y, z])) + view_plane_d  # ax + by + cz + d 
+    cos_theta = torch.sqrt( 1 - r**2/p)
+
+    light_plane_norm = light_o - sphere_center #[3, ] = [a, b, c]
+    light_plane_norm = light_plane_norm / torch.norm(light_plane_norm) # normalize
+    p = torch.pow(light_o - sphere_center, 2).sum().data # scalar, distance b/w ray origin to sphere center
+    t = (p - r**2)/torch.sqrt(p) # distance b/w ray origin to plane
+    light_plane_point = light_o - light_plane_norm * t 
+    light_plane_d = - torch.dot(light_plane_point, light_plane_norm)
+    light_plane = lambda x, y, z : torch.dot(light_plane_norm, torch.tensor([x, y, z])) + light_plane_d  # ax + by + cz + d 
 
     sphere_diffuse = torch.tensor([0.5, 0., 0.])
+    # sphere_diffuse = torch.stack((torch.full((N_rays, ), sphere_diffuse[0]), torch.full((N_rays, ), sphere_diffuse[1]), torch.full((N_rays, ), sphere_diffuse[2])), dim=-1)
+    print(f'sphere_diffuse: {sphere_diffuse.shape}')
     sphere_ambient = [0.1, 0., 0.] # shadow color 
     sphere_specular = sphere_diffuse * 2 # need clip? 
 
     plane_diffuse = torch.tensor([1., 1., 1.])
+    # plane_diffuse = torch.stack((torch.full((N_rays, ), plane_diffuse[0]), torch.full((N_rays, ), plane_diffuse[1]), torch.full((N_rays, ), plane_diffuse[2])), dim=-1)
     plane_ambient = plane_diffuse # shadow color for plane
 
     # shpere  
-    sphere_center = [0., 0., 0,5]
-    sphere_radius = 0.5
+    
 
     # 0 : sphere surface
     # + : sphere outer range
     # - : sphere inner range
-    sphere_ftn = lambda z, x, y: (x - sphere_center[0])**2 + (y - sphere_center[1])**2 + (z - sphere_center[2])**2 - sphere_radius**2 
+    is_inside_sphere = lambda index: 1 if torch.dot(ray_d[index] / torch.norm(ray_d[index]), view_plane_norm) > cos_theta else 0 #[N_rays, 3]
 
     # shadow plane for sphere
     # 0 : plane surface
     # + : plane upper range
     # - : plane bottom range
-    sphere_shadow_plane_ftn = lambda z: z - 5/9
+    is_inside_sphere_shadow = lambda index: 1 if light_plane(ray_d[index] / torch.norm(ray_d[index])) < 0 else 0
 
-    # sphere shadow
-    # 1 : true for sphere shadow area
-    # 0 : false for non sphere shadow area
-    sphere_shadow_ftn = lambda arr: 1 if abs(sphere_ftn(arr[0], arr[1], arr[2])) < thres and sphere_shadow_plane_ftn(arr[0]) < 0 else 0 
+    inside_sphere_index = list(filter(is_inside_sphere, torch.arange(N_rays)))
+    sphere_shadow_index = list(filter(is_inside_sphere_shadow, inside_sphere_index)) # [index]
 
-    # plane shadow 
-    # 1 : true for plane shadow area 
-    # 0 : false for non plane shadow area 
-    plane_shadow_ftn = lambda arr: 1 if abs(arr[0]) < thres and (arr[1]**2 + arr[2]**2 - 5/16) < 0 else 0
+    for index in sphere_shadow_index:
+        rgb_map[index] = sphere_diffuse
 
-    # v_sphere_shadow_ftn = np.vectorize(sphere_shadow_ftn)
-    # v_plane_shadow_ftn = np.vectorize(plane_shadow_ftn)
+    # sphere_shadow_plane_ftn = lambda z: z - 5/9
 
-    pts = pts.reshape(N_rays * N_samples, 3)
-    # rgb_map : [N_rays, 3]
-    # pts : [(N_rays * N_samples, 3]
-    s_pts = torch.tensor(list(map(sphere_shadow_ftn, pts)))  # [N_rays * N_samples, 1]
-    s_pts = s_pts.reshape(N_rays, N_samples)
-    is_s_shadow = s_pts.sum(-1) # [N_rays]
-    p_pts = torch.tensor(list(map(plane_shadow_ftn, pts))) # [N_rays * N_samples, 1]
-    p_pts = p_pts.reshape(N_rays, N_samples) 
-    is_p_shadow = p_pts.sum(-1) # [N_rays]
+    # # sphere shadow
+    # # 1 : true for sphere shadow area
+    # # 0 : false for non sphere shadow area
+    # sphere_shadow_ftn = lambda arr: 1 if abs(sphere_ftn(arr[0], arr[1], arr[2])) < thres and sphere_shadow_plane_ftn(arr[0]) < 0 else 0 
 
-    change_color = lambda original, condition, new: new.tolist() if condition else original.tolist()
-    change_plane =  torch.tensor(list(map(change_color,rgb_map, is_p_shadow, plane_diffuse)))  # [N_rays, 3], torch.tensor's list
-    change_sphere =  torch.tensor(list(map(change_color, change_plane, is_s_shadow, sphere_diffuse)))  # [N_rays, 3], torch.tensor
+    # # plane shadow 
+    # # 1 : true for plane shadow area 
+    # # 0 : false for non plane shadow area 
+    # plane_shadow_ftn = lambda arr: 1 if abs(arr[0]) < thres and (arr[1]**2 + arr[2]**2 - 5/16) < 0 else 0
+
+    # # v_sphere_shadow_ftn = np.vectorize(sphere_shadow_ftn)
+    # # v_plane_shadow_ftn = np.vectorize(plane_shadow_ftn)
+
+    # pts = pts.reshape(N_rays * N_samples, 3)
+    # # rgb_map : [N_rays, 3]
+    # # pts : [(N_rays * N_samples, 3]
+    # s_pts = torch.tensor(list(map(sphere_shadow_ftn, pts)))  # [N_rays * N_samples, 1]
+    # s_pts = s_pts.reshape(N_rays, N_samples)
+    # is_s_shadow = s_pts.sum(-1) # [N_rays]
+    # print(f'is_s_shadow: {is_s_shadow.shape}')
+    # p_pts = torch.tensor(list(map(plane_shadow_ftn, pts))) # [N_rays * N_samples, 1]
+    # p_pts = p_pts.reshape(N_rays, N_samples) 
+    # is_p_shadow = p_pts.sum(-1) # [N_rays]
+
+    # change_color = lambda original, condition, new: new.tolist() if condition else original.tolist()
+    # change_plane =  torch.tensor(list(map(change_color,rgb_map, is_p_shadow, plane_diffuse)))  # [N_rays, 3], torch.tensor's list
+    # print(f'change_plane: {change_plane.shape}')
+    # change_sphere =  torch.tensor(list(map(change_color, change_plane, is_s_shadow, sphere_diffuse)))  # [N_rays, 3], torch.tensor
 
     # change_sphere = change_sphere.reshape(N_rays, N_samples, 3)
     # change_sphere = torch.tensor(change_sphere)
@@ -417,7 +455,7 @@ def change_color(rgb_map, disp_map, acc_map, weights, depth_map, pts):
     #             rgb_map[ray][sample] = sphere_diffuse
 
 
-    return change_sphere
+    return rgb_map
 
 
 
@@ -499,7 +537,7 @@ def render_rays(ray_batch,
 #     raw = run_network(pts)
     # coarse network
     raw = network_query_fn(pts, viewdirs, network_fn)
-    rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(raw, z_vals, rays_d, pts, raw_noise_std, white_bkgd, pytest=pytest)
+    rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(raw, z_vals, rays_o, rays_d, pts, raw_noise_std, white_bkgd, pytest=pytest)
 
     # fine network
     if N_importance > 0:
@@ -517,7 +555,7 @@ def render_rays(ray_batch,
 #         raw = run_network(pts, fn=run_fn)
         raw = network_query_fn(pts, viewdirs, run_fn)
 
-        rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(raw, z_vals, rays_d, pts, raw_noise_std, white_bkgd, pytest=pytest)
+        rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(raw, z_vals, rays_o, rays_d, pts, raw_noise_std, white_bkgd, pytest=pytest)
 
     ret = {'rgb_map' : rgb_map, 'disp_map' : disp_map, 'acc_map' : acc_map}
     if retraw:
