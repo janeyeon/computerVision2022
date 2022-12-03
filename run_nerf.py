@@ -363,7 +363,7 @@ def change_color(rgb_map, disp_map, acc_map, weights, depth_map, pts):
     # 0 : sphere surface
     # + : sphere outer range
     # - : sphere inner range
-    sphere_ftn = lambda z, x, y: (x - sphere_center[0])**2 + (y - sphere_center[1])**2 + (-z - sphere_center[2])**2 - sphere_radius**2 
+    sphere_ftn = lambda z, x, y: (x - sphere_center[0])**2 + (y - sphere_center[1])**2 + (z - sphere_center[2])**2 - sphere_radius**2 
 
     # shadow plane for sphere
     # 0 : plane surface
@@ -374,12 +374,12 @@ def change_color(rgb_map, disp_map, acc_map, weights, depth_map, pts):
     # sphere shadow
     # 1 : true for sphere shadow area
     # 0 : false for non sphere shadow area
-    sphere_shadow_ftn = lambda arr: 1 if abs(sphere_ftn(arr[0], arr[1], arr[2])) < thres and sphere_shadow_plane_ftn(-arr[0]) < 0 else 0 
+    sphere_shadow_ftn = lambda arr: 1 if abs(sphere_ftn(arr[0], arr[1], arr[2])) < thres and sphere_shadow_plane_ftn(arr[0]) < 0 else 0 
 
     # plane shadow 
     # 1 : true for plane shadow area 
     # 0 : false for non plane shadow area 
-    plane_shadow_ftn = lambda arr: 1 if abs(-arr[0]) < thres and (arr[1]**2 + arr[2]**2 - 5/16) < 0 else 0
+    plane_shadow_ftn = lambda arr: 1 if abs(arr[0]) < thres and (arr[1]**2 + arr[2]**2 - 5/16) < 0 else 0
 
     # v_sphere_shadow_ftn = np.vectorize(sphere_shadow_ftn)
     # v_plane_shadow_ftn = np.vectorize(plane_shadow_ftn)
@@ -394,9 +394,9 @@ def change_color(rgb_map, disp_map, acc_map, weights, depth_map, pts):
     p_pts = p_pts.reshape(N_rays, N_samples) 
     is_p_shadow = p_pts.sum(-1) # [N_rays]
 
-    change_color = lambda original, condition, new: new if condition else original 
+    change_color = lambda original, condition, new: new.tolist() if condition else original.tolist()
     change_plane =  torch.tensor(list(map(change_color,rgb_map, is_p_shadow, plane_diffuse)))  # [N_rays, 3], torch.tensor's list
-    change_sphere =  torch.tensor((map(change_color, change_plane, is_s_shadow, sphere_diffuse)))  # [N_rays, 3], torch.tensor
+    change_sphere =  torch.tensor(list(map(change_color, change_plane, is_s_shadow, sphere_diffuse)))  # [N_rays, 3], torch.tensor
 
     # change_sphere = change_sphere.reshape(N_rays, N_samples, 3)
     # change_sphere = torch.tensor(change_sphere)
