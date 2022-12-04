@@ -403,10 +403,11 @@ def change_color(rgb_map, disp_map, acc_map, weights, depth_map, ray_o, ray_d, p
     # 0 : plane surface
     # + : plane upper range
     # - : plane bottom range
-    is_inside_sphere_shadow = lambda index: 1 if light_plane(pts[index][torch.argmax(weights[index])]) < 0 else 0
+    # is_inside_sphere_shadow = lambda index: torch.any(torch.tensor([light_plane(pts[index][find_max_sample_index(index)[i]]) < 0 for i in range(3)]))
+    is_inside_sphere_shadow = lambda index: 1 if light_plane(ray_o + ray_d[index] * depth_map[index]) < 0 else 0
 
     # view_plane_point_with_rayd = lambda index: ray_o + ray_d[index] * (view_plane_t / torch.dot(ray_d[index], -view_plane_norm))
-    # find_max_sample_index  = lambda index: torch.argmax(weights[index])
+    find_max_sample_index  = lambda index: torch.tensor([torch.argmax(weights[index]) - 2, torch.argmax(weights[index]) - 1, torch.argmax(weights[index])])
 
     # for sphere shadow 
     inside_sphere_ray_index = list(filter(is_inside_sphere, torch.arange(N_rays)))
@@ -415,7 +416,7 @@ def change_color(rgb_map, disp_map, acc_map, weights, depth_map, ray_o, ray_d, p
     print(f'sphere_shadow_ray_index length: {len(sphere_shadow_ray_index)}')
 
     # for plane shadow
-
+    ### 
 
     # for_debugging_z = lambda index: 1 if pts
 
