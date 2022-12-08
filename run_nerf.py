@@ -8,6 +8,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from tqdm import tqdm, trange
+import gc
 
 import matplotlib.pyplot as plt
 
@@ -316,22 +317,6 @@ def raw2outputs(raw, z_vals, rays_o, rays_d, pts, raw_noise_std=0, white_bkgd=Fa
 
     # TODO : depth map을 바꿔서 그거의 역수를 취한 disp_map으로 output 확인
 
-    # acc_map_tmp = acc_map
-    # acc_map_tmp[acc_map_tmp <= 0.9] = 0
-    # red = torch.ones_like(rgb_map[...,0])
-    # rgb_map[...,1] = rgb_map[...,1] + red
-    # rgb_map = rgb_map / 2 * acc_map_tmp[...,None]
-    # np.set_printoptions(threshold = sys.maxsize)
-    # torch.set_printoptions(threshold = sys.maxsize)
-    # print(depth_map)
-    # print(acc_map)
-    # r = 0.0
-    # g = 0.0
-    # b = 1.0
-    # rgb_map[...,0] = rgb_map[...,0] * r
-    # rgb_map[...,1] = rgb_map[...,1] * g
-    # rgb_map[...,2] = rgb_map[...,2] * b
-
     new_rgb_map = change_color(rgb_map, disp_map, acc_map, weights, depth_map, rays_o, rays_d, pts)
     rgb_map = new_rgb_map
     print("!!")
@@ -342,6 +327,8 @@ def raw2outputs(raw, z_vals, rays_o, rays_d, pts, raw_noise_std=0, white_bkgd=Fa
 
 def change_color(rgb_map, disp_map, acc_map, weights, depth_map, ray_o, ray_d, pts):
 
+    # ---------------------------------------------------------------------------------------------------------------------------------
+    # ---------------------------------------------------------------------------------------------------------------------------------
     # ray_o = ray_o[...,:] #[N_rays, 3]
     print(f'ray_d: {ray_d.shape}')
     ray_o = ray_o[0] #[3, ]
@@ -349,22 +336,32 @@ def change_color(rgb_map, disp_map, acc_map, weights, depth_map, ray_o, ray_d, p
 
     N_rays, N_samples, _ = pts.shape
     print(f'pts: {pts.shape}')
-    # rays = np.arange(N_rays)
-    # samples = np.arange(N_samples)
-    # m_rays, m_samples = np.meshgrid(rays, samples)
-
-    # ---------------------------------------------------------------------------------------------------------------------------------
-    # ---------------------------------------------------------------------------------------------------------------------------------
-
-
-    thres = 0.02
+  
     light_o = torch.tensor([0, 2.5, 1.5]) # z, x, y
     sphere_center = torch.tensor([0., 0., 0.5]) # z, x, y
     r = 0.5
 
-    # print(f'ray_d: {ray_d}')
-    # print(f'ray_d norm: {torch.norm(ray_d[0])}, {torch.norm(ray_d[1000])}')
-    norm_d = torch.tensor(list(map(lambda index: (ray_d[index]/torch.norm(ray_d[index])).tolist(), torch.arange(N_rays))))
+    GROUND_COLOR = 0
+    GROUND_SHADOW = 1 
+    SPHERE_COLOR = 2
+
+    sphere_diffuse = torch.tensor([1., 0., 0.])
+    sphere_ambient = 0.2 # shadow color 
+    sphere_specular = torch.tensor([1., 1., 1.])
+
+    plane_diffuse = torch.tensor([0.8, 0.8, 0.8])
+    # plane_diffuse = torch.stack((torch.full((N_rays, ), plane_diffuse[0]), torch.full((N_rays, ), plane_diffuse[1]), torch.full((N_rays, ), plane_diffuse[2])), dim=-1)
+    plane_ambient = plane_diffuse *0.2 # shadow color for plane
+
+    # ---------------------------------------------------------------------------------------------------------------------------------
+    # ---------------------------------------------------------------------------------------------------------------------------------
+    norm_d_time = time.time()
+    # initialization of rgb_map
+    rgb_map = torch.full((N_rays,3), 0.8)
+    norm_d = torch.sqrt(torch.pow(ray_d, 2).sum(axis=-1)) #[N_rays, ]
+    norm_d = torch.div(ray_d, torch.tile(norm_d, (3,)).reshape(N_rays, 3))
+    # norm_d = torch.tensor(list(map(lambda index: (ray_d[index]/torch.norm(ray_d[index])).tolist(), torch.arange(N_rays))))
+    print(f'norm_d_time: {time.time() - norm_d_time}')
 
     view_plane_norm = ray_o - sphere_center #[3, ] = [a, b, c]
     view_plane_norm = view_plane_norm / torch.norm(view_plane_norm) # normalize
@@ -384,21 +381,10 @@ def change_color(rgb_map, disp_map, acc_map, weights, depth_map, ray_o, ray_d, p
     light_plane_d = - torch.dot(light_plane_point, light_plane_norm)
     light_plane = lambda point : torch.dot(light_plane_norm, point) + light_plane_d  # ax + by + cz + d 
 
+    ground_shadow_time = time.time()
 
-    
-
-    sphere_diffuse = torch.tensor([1., 0., 0.])
-    # sphere_diffuse = torch.stack((torch.full((N_rays, ), sphere_diffuse[0]), torch.full((N_rays, ), sphere_diffuse[1]), torch.full((N_rays, ), sphere_diffuse[2])), dim=-1)
-    # print(f'sphere_diffuse: {sphere_diffuse.shape}')
-    sphere_ambient = 0.2 # shadow color 
-    sphere_specular = torch.tensor([1., 1., 1.])
-
-    plane_diffuse = torch.tensor([0.8, 0.8, 0.8])
-    # plane_diffuse = torch.stack((torch.full((N_rays, ), plane_diffuse[0]), torch.full((N_rays, ), plane_diffuse[1]), torch.full((N_rays, ), plane_diffuse[2])), dim=-1)
-    plane_ambient = plane_diffuse *0.2 # shadow color for plane
-
-    rgb_map = torch.full((N_rays,3), 0.8)
-    ##################################################
+    # ---------------------------------------------------------------------------------------------------------------------------------
+    # ---------------------------------------------------------------------------------------------------------------------------------
     #ground plane shadow
     phi = torch.atan2(light_o[2],torch.sqrt(light_o[0]**2+light_o[1]**2))
 
@@ -417,8 +403,6 @@ def change_color(rgb_map, disp_map, acc_map, weights, depth_map, ray_o, ray_d, p
                                     [0,0,0,1]])
     #rotation matrix of elipse on xy plane
     theta = -1 * torch.atan2(light_o[1] + ty,light_o[0] + tx)
-    # print(f'theta: {theta}')
-    # print(f'ray_o: {ray_o}')
 
     rotation_matrix = torch.tensor([[torch.cos(theta),-1*torch.sin(theta),0,0],
                                     [torch.sin(theta),torch.cos(theta),0,0],
@@ -431,134 +415,87 @@ def change_color(rgb_map, disp_map, acc_map, weights, depth_map, ray_o, ray_d, p
                                     [0,0,1,0],
                                     [0,0,0,1]])
     to_circle_matrix = scaling_matrix@rotation_matrix@translation_matrix
-    ########################################################
+
+
     ##transform the ray origin
     ray_o_homo = torch.ones(4)
     ray_o_homo[:3] = ray_o
     homo_ray_d = torch.cat((norm_d,torch.ones((N_rays,1))), dim=-1)
     transformed_ray_o = to_circle_matrix@ray_o_homo
-    transformed_ray_d = lambda index : scaling_matrix@rotation_matrix@homo_ray_d[index]
+    homography_for_ray_d = scaling_matrix@rotation_matrix
+    transformed_ray_d = torch.tile(homography_for_ray_d.flatten(),(N_rays,)).reshape((N_rays,4,4))
+    homo_ray_d_4_1 = homo_ray_d.reshape((N_rays,4,1))
+    transformed_ray_d = (transformed_ray_d@homo_ray_d_4_1).reshape((N_rays,4))
+    # transformed_ray_d = lambda index : scaling_matrix@rotation_matrix@homo_ray_d[index]
 
-    transformed_ray_o_divide =  transformed_ray_o[:3]/transformed_ray_o[3]
-    transformed_ray_d_divide = lambda index: (transformed_ray_d(index)/transformed_ray_d(index)[-1])[:3]  #[N_rays, 3]
-    # #rotation matrix of transformed ellipse in 3D
-    # x = transformed_ray_o[0]/transformed_ray_o[3]
-    # y = transformed_ray_o[1]/transformed_ray_o[3]
-    # z = transformed_ray_o[2]/transformed_ray_o[3]
-    # alpha = -1*torch.atan2(torch.sqrt(x**2+y**2),z)
-    # beta = -1*torch.atan2(y,x)
-    # print(cos_alpha,sin_alpha,cos_beta,sin_beta)
-    
-    # rotation_matrix_x = torch.tensor([[1,0,0,0],
-    #                                 [0,.cos(beta),-1*sin_beta,0],
-    #                                 [0,sin_beta,cos_beta,0],
-    #                                 [0,0,0,1]])
-    # rotation_matrix_z = torch.tensor([[torch.cos(beta),-1*torch.sin(beta),0,0],
-    #                                 [torch.sin(beta),torch.cos(beta),0,0],
-    #                                 [0,0,1,0],
-    #                                 [0,0,0,1]])                                
-    # rotation_matrix_y = torch.tensor([[torch.cos(alpha),0,torch.sin(alpha),0],
-    #                                 [0,1,0,0],
-    #                                 [-1*torch.sin(alpha),0,torch.cos(alpha),0],
-    #                                 [0,0,0,1]])
-    # scaling_matrix_2 = torch.tensor([[1,0,0,0],
-    #                                 [0,1/torch.sin(torch.atan2(ray_o[2],torch.sqrt(ray_o[0]**2+ray_o[1]**2))),0,0],
-    #                                 [0,0,1,0],
-    #                                 [0,0,0,1]])
-    # R_z_2 = torch.atan2(ray_o[1],ray_o[0]) - torch.pi/2
-    # rotation_matrix_2 = torch.tensor([[torch.cos(R_z_2),-1*torch.sin(R_z_2),0,0],
-    #                                 [torch.sin(R_z_2),torch.cos(R_z_2),0,0],
-    #                                 [0,0,1,0],
-    #                                 [0,0,0,1]])
-    ## homography matrix
-    # homography_matrix = rotation_matrix_y@rotation_matrix_z@to_circle_matrix
-    # homo_ray_d = torch.cat((norm_d,torch.ones((N_rays,1))), dim=-1)
-    # print(f'rotation_matrix_z: {rotation_matrix_z}')
-    # print(f'rotation_matrix_y: {rotation_matrix_y}')
-    # print(transformed_ray_o)
-    # print( rotation_matrix_z@transformed_ray_o)
-    # transformed_ray_o = rotation_matrix_y@rotation_matrix_z@transformed_ray_o
-    # transformed_ray_o_divide =  transformed_ray_o[:3]/transformed_ray_o[3]
-    # criterion_cos_theta = torch.cos(torch.atan2(long,torch.norm(transformed_ray_o_divide)))
-    # transformed_ray_d_matmul = lambda index : (homography_matrix@homo_ray_d[index])
-    # transformed_ray_d_divide = lambda index: (transformed_ray_d_matmul(index)/transformed_ray_d_matmul(index)[-1])[:3]  #[N_rays, 3]
-    # vec_norm = lambda vector: vector / torch.norm(vector)
-    ##comose lambda
+    transformed_ray_o_divide =  transformed_ray_o[:3]/transformed_ray_o[3] # [3, ]
+    transformed_ray_d_w = torch.tile(transformed_ray_d[..., -1], (3,)).reshape(N_rays, 3)
+    transformed_ray_d = transformed_ray_d[..., 0:3] #[N_rays, 3]
+    transformed_ray_d = transformed_ray_d / transformed_ray_d_w # [N_rays, 3]
+    transformed_ray_d_t =  torch.div(torch.full((N_rays, ), -1 * transformed_ray_o_divide[2]), transformed_ray_d[..., 2])  # [N_rays, 1]
+    print(transformed_ray_d_t.shape)
+    transformed_ray_d_t = torch.tile(transformed_ray_d_t, (3, )).reshape((N_rays, 3))
+    transformed_ray_o_divides = torch.tile(transformed_ray_o_divide, (N_rays,)).reshape((N_rays, 3)) # [N_rays, 3]
+    ground_points = transformed_ray_o_divides + transformed_ray_d_t * transformed_ray_d
+    ground_points = torch.pow(ground_points, 2).sum(axis=-1) - long**2 #[N_rays, 1]
 
-    ground_point = lambda index : transformed_ray_o_divide + (- transformed_ray_o_divide[2] / transformed_ray_d_divide(index)[2]) * transformed_ray_d_divide(index)
+    # transformed_ray_d_divide = lambda index: (transformed_ray_d[index]/transformed_ray_d[index][-1])[:3]  #[N_rays, 3]
+   
+    # ##comose lambda
+
+    # ground_point = lambda index : transformed_ray_o_divide + (- transformed_ray_o_divide[2] / transformed_ray_d_divide(index)[2]) * transformed_ray_d_divide(index)
 
 
-    is_inside_ellipse_shadow = lambda index: 1 if torch.norm(ground_point(index)) <= long else 0  #[N_rays, 3]
+    is_inside_ellipse_shadow = lambda index: 1 if ground_points[index] < 0 else 0  #[N_rays, 3]
     inside_ellipse_ray_index = list(filter(is_inside_ellipse_shadow, torch.arange(N_rays)))
     
-
-
-    # is_inside_ellipse_shadow = lambda index: 1 if torch.dot(vec_norm(transformed_ray_d_divide(index)), -vec_norm(transformed_ray_o_divide)) > criterion_cos_theta else 0  #[N_rays, 3]
-    # inside_ellipse_ray_index = list(filter(is_inside_ellipse_shadow, torch.arange(N_rays)))
-
-    # print(f'inside_ellipse_ray_index: {len(inside_ellipse_ray_index)}')
     for index in inside_ellipse_ray_index:
         # rgb_map[index] = rgb_map[index] * plane_ambient
         rgb_map[index] = plane_ambient
 
+    print(f'ground_shadow_time: {time.time() - ground_shadow_time}')
     # ---------------------------------------------------------------------------------------------------------------------------------
     # ---------------------------------------------------------------------------------------------------------------------------------
 
+    sphere_time = time.time()
     # sphere ---------------------------------------------------------------------------------------------------------------------------------
     # 0 : sphere surface
     # + : sphere outer range
     # - : sphere inner range
-    is_inside_sphere = lambda index: 1 if torch.dot(norm_d[index], -view_plane_norm) > cos_theta else 0  #[N_rays, 3]
+    view_plane_norms = torch.tile(-view_plane_norm, (N_rays,)).reshape((N_rays, 3, 1)) #(N_rays, 3, 1)
+    sphere_cos_val = norm_d.reshape(N_rays, 1, 3)@view_plane_norms #[N_Rays, 1]
 
-
-    # shadow plane for sphere
-    # 0 : plane surface
-    # + : plane upper range
-    # - : plane bottom range
-    # is_inside_sphere_shadow = lambda index: torch.any(torch.tensor([light_plane(pts[index][find_max_sample_index(index)[i]]) < 0 for i in range(3)]))
-   
-
-    # view_plane_point_with_rayd = lambda index: ray_o + ray_d[index] * (view_plane_t / torch.dot(ray_d[index], -view_plane_norm))
-    # find_max_sample_index  = lambda index: torch.tensor([torch.argmax(weights[index]) - 2, torch.argmax(weights[index]) - 1, torch.argmax(weights[index])])
+    is_inside_sphere = lambda index: 1 if sphere_cos_val[index] > cos_theta else 0  #[N_rays, 3]
 
     # for sphere shadow 
     inside_sphere_ray_index = list(filter(is_inside_sphere, torch.arange(N_rays)))
     # print(f'inside_sphere_ray_index length: {len(inside_sphere_ray_index)}')
     dist_thres = 0.1
      
-    # + 1: under 
-    # - 1: upper max
-    light_plane_distances = torch.tensor(list(map( lambda index: (light_plane(ray_o + norm_d[index] * depth_map[index])).tolist(), inside_sphere_ray_index)))
-    
-    # is_inside_sphere_shadow = lambda index: 1 if light_plane(ray_o + norm_d[index] * depth_map[index]) < 0 else 0
-
-    # sphere_shadow_ray_index = list(filter(is_inside_sphere_shadow, inside_sphere_ray_index)) # [index]
-    # print(f'sphere_shadow_ray_index length: {len(sphere_shadow_ray_index)}')
-
     # diffuse ---------------------------------------------------------------------------------------------------------------------------------
     # for diffuse color 
     for index in inside_sphere_ray_index:
         rgb_map[index] = sphere_diffuse
-    ### 
-
+    
+    print(f'sphere_diffuse_time: {time.time() - sphere_time}')
+     
+    
+    sphere_shadow_time = time.time()
     # Sphere shadow ---------------------------------------------------------------------------------------------------------------------------------
-
+    # + 1: under 
+    # - 1: upper max
+    light_plane_distances = torch.tensor(list(map( lambda index: (light_plane(ray_o + norm_d[index] * depth_map[index])).tolist(), inside_sphere_ray_index)))
+ 
     for index in range(len(inside_sphere_ray_index)):
         # blurring
         weight = (1 - sphere_ambient) * (1 / (1 + torch.exp(-20 * light_plane_distances[index]))) + sphere_ambient
         rgb_map[inside_sphere_ray_index[index]] *= weight
 
+    print(f'len(inside_sphere_ray_index): {len(inside_sphere_ray_index)}')
+    print(f'sphere_shadow_time: {time.time() - sphere_shadow_time}')
+
+    sphere_specular_time = time.time()
     # specular ---------------------------------------------------------------------------------------------------------------------------------
-
-    # viewing_dir = - ray_d[index]
-    # point = ray_o + norm_d[index] * depth_map[index] # point on sphere
-    # normal = sphere_points[index] - sphere_center
-    # reflected_viewing_dir = 2 * torch.dot(normal, viewing_dir) * normal - viewing_dir
-    # reflected_viewing_dir = reflected_viewing_dir / torch.norm(reflected_viewing_dir)
-    # light_dir = light_o - sphere_points[index]
-    # light_dir = light_dir / torch.norm(light_dir)
-    # specular_intensity = torch.pow(torch.dot(light_dir, reflected_viewing_dir), 3)
-
     sphere_points = torch.tensor(list(map(lambda index: (ray_o + norm_d[index] * depth_map[index]).tolist(), inside_sphere_ray_index)))
     sphere_rays = torch.tensor(list(map(lambda index: norm_d[index].tolist(), inside_sphere_ray_index)))
     # normalized sphere normals 
@@ -568,11 +505,24 @@ def change_color(rgb_map, disp_map, acc_map, weights, depth_map, ray_o, ray_d, p
     light_dirs = torch.tensor(list(map(lambda point: ((light_o - point) / torch.norm(light_o - point)).tolist(), sphere_points)))
     specular_intensities = torch.tensor(list(map(lambda index: (torch.pow(torch.dot(light_dirs[index], reflected_viewing_dirs[index]), 5)).tolist(), range(len(inside_sphere_ray_index)))))
     specular_intensities = torch.clip(specular_intensities, 0, 1)
-    # print(f'specular_intensities: {specular_intensities}')
-    # print(f'specular_intensities: {specular_intensities.shape}')
-
+  
     for index in range(len(inside_sphere_ray_index)):
         rgb_map[inside_sphere_ray_index[index]] += specular_intensities[index] * sphere_specular
+
+    print(f'sphere_specular_time: {time.time() - sphere_specular_time}')
+    # result_color = {0: plane_ambient, 1: sphere_diffuse, 2: sphere_diffuse * , 3: , 4:}
+    # for index in range(N_rays):
+    #     value = total_ray(index)
+    #     if value == GROUND_COLOR:
+    #         pass
+    #     elif value == GROUND_SHADOW:
+    #         pass
+    #     elif value == SPHERE_COLOR:
+    #         # default diffuse 
+    #         rgb_map[index] = sphere_diffuse
+    #         if 
+    #         pass
+        
 
     # clip color 
     rgb_map = torch.clamp(rgb_map, 0, 1)
