@@ -358,8 +358,9 @@ def change_color(rgb_map, disp_map, acc_map, weights, depth_map, ray_o, ray_d, p
     norm_d_time = time.time()
     # initialization of rgb_map
     rgb_map = torch.full((N_rays,3), 0.8)
-    norm_d = torch.sqrt(torch.pow(ray_d, 2).sum(axis=-1)) #[N_rays, ]
-    norm_d = torch.div(ray_d, torch.tile(norm_d, (3,)).reshape(N_rays, 3))
+    norm_d_sum = torch.sqrt(torch.pow(ray_d, 2).sum(axis=-1)) #[N_rays, ]
+    norm_d_sum = norm_d_sum.reshape(N_rays, 1).repeat(1, 3)  #[N_rays, 3]
+    norm_d = torch.div(ray_d, norm_d_sum)  #[N_rays, 3]
     # norm_d = torch.tensor(list(map(lambda index: (ray_d[index]/torch.norm(ray_d[index])).tolist(), torch.arange(N_rays))))
     print(f'norm_d_time: {time.time() - norm_d_time}')
 
@@ -423,19 +424,20 @@ def change_color(rgb_map, disp_map, acc_map, weights, depth_map, ray_o, ray_d, p
     homo_ray_d = torch.cat((norm_d,torch.ones((N_rays,1))), dim=-1)
     transformed_ray_o = to_circle_matrix@ray_o_homo
     homography_for_ray_d = scaling_matrix@rotation_matrix
-    transformed_ray_d = torch.tile(homography_for_ray_d.flatten(),(N_rays,)).reshape((N_rays,4,4))
+    transformed_ray_d = homography_for_ray_d.repeat((N_rays, 1, 1)) #[N_rays, 4, 4]
     homo_ray_d_4_1 = homo_ray_d.reshape((N_rays,4,1))
     transformed_ray_d = (transformed_ray_d@homo_ray_d_4_1).reshape((N_rays,4))
     # transformed_ray_d = lambda index : scaling_matrix@rotation_matrix@homo_ray_d[index]
 
     transformed_ray_o_divide =  transformed_ray_o[:3]/transformed_ray_o[3] # [3, ]
-    transformed_ray_d_w = torch.tile(transformed_ray_d[..., -1], (3,)).reshape(N_rays, 3)
+    transformed_ray_d_w = transformed_ray_d[..., -1].reshape(N_rays, 1).repeat(1, 3) #[N_rays, 3]
+
     transformed_ray_d = transformed_ray_d[..., 0:3] #[N_rays, 3]
     transformed_ray_d = transformed_ray_d / transformed_ray_d_w # [N_rays, 3]
     transformed_ray_d_t =  torch.div(torch.full((N_rays, ), -1 * transformed_ray_o_divide[2]), transformed_ray_d[..., 2])  # [N_rays, 1]
     print(transformed_ray_d_t.shape)
-    transformed_ray_d_t = torch.tile(transformed_ray_d_t, (3, )).reshape((N_rays, 3))
-    transformed_ray_o_divides = torch.tile(transformed_ray_o_divide, (N_rays,)).reshape((N_rays, 3)) # [N_rays, 3]
+    transformed_ray_d_t = transformed_ray_d_t.reshape(N_rays, 1).repeat(1, 3) #[N_rays, 3]
+    transformed_ray_o_divides = transformed_ray_o_divide.reshape(1, 3).repeat(N_rays, 1) # [N_rays, 3]
     ground_points = transformed_ray_o_divides + transformed_ray_d_t * transformed_ray_d
     ground_points = torch.pow(ground_points, 2).sum(axis=-1) - long**2 #[N_rays, 1]
 
@@ -462,7 +464,7 @@ def change_color(rgb_map, disp_map, acc_map, weights, depth_map, ray_o, ray_d, p
     # 0 : sphere surface
     # + : sphere outer range
     # - : sphere inner range
-    view_plane_norms = torch.tile(-view_plane_norm, (N_rays,)).reshape((N_rays, 3, 1)) #(N_rays, 3, 1)
+    view_plane_norms = (-view_plane_norm).reshape(1, 3, 1).repeat(N_rays, 1, 1) #(N_rays, 3, 1)
     sphere_cos_val = norm_d.reshape(N_rays, 1, 3)@view_plane_norms #[N_Rays, 1]
 
     is_inside_sphere = lambda index: 1 if sphere_cos_val[index] > cos_theta else 0  #[N_rays, 3]
@@ -511,14 +513,8 @@ def change_color(rgb_map, disp_map, acc_map, weights, depth_map, ray_o, ray_d, p
 
     print(f'sphere_specular_time: {time.time() - sphere_specular_time}')
     # result_color = {0: plane_ambient, 1: sphere_diffuse, 2: sphere_diffuse * , 3: , 4:}
-    # for index in range(N_rays):
-    #     value = total_ray(index)
-    #     if value == GROUND_COLOR:
-    #         pass
-    #     elif value == GROUND_SHADOW:
-    #         pass
-    #     elif value == SPHERE_COLOR:
-    #         # default diffuse 
+    # for index in range(N_rays):zzzzz
+    #     vcffuse 
     #         rgb_map[index] = sphere_diffuse
     #         if 
     #         pass
