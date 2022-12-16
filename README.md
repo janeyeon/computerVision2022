@@ -15,6 +15,7 @@ In our project, we first trained the original NeRF with the 3D objects we intend
 
 ## Implementation 
 To find the implementation part of our project, notice the `change_color()` function in the `run_nerf.py` file.
+For more concrete explanation, please refer the `team09_report.pdf` uploaded above.
 The specific implementation procedure is as follows 
 
 ### Ground plane shadow 
